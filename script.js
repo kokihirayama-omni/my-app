@@ -53,6 +53,16 @@ function toggleTodo(id) {
     const todo = todos.find(t => t.id === id);
     if (todo) {
         todo.completed = !todo.completed;
+
+        // タスクが完了した時に紙吹雪を発動
+        if (todo.completed) {
+            confetti({
+                particleCount: 100,
+                spread: 70,
+                origin: { y: 0.6 }
+            });
+        }
+
         saveTodos();
         renderTodos();
     }
