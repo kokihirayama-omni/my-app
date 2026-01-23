@@ -70,7 +70,7 @@ jobs:
           if args.role in ["architect", "tester", "developer"]:
               client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
               p = f"{prompts[args.role]}\n\nInput:\n{args.input}\nContext:\n{get_context(args.context)}"
-              res = client.messages.create(model="claude-3-5-sonnet-20240620", max_tokens=4000, messages=[{"role":"user","content":p}])
+             res = client.messages.create(model="claude-3-5-sonnet-latest", max_tokens=4000, messages=[{"role":"user","content":p}])
               content = res.content[0].text
           elif args.role == "reviewer":
               client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
