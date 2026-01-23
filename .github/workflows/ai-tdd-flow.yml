@@ -1,0 +1,125 @@
+name: AI TDD Development Flow
+
+on:
+  issues:
+    types: [opened, edited]
+    if: contains(github.event.issue.labels.*.name, 'ai-dev')
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  ai-development-cycle:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install anthropic openai pytest
+
+      - name: Create Scripts Directory
+        run: mkdir -p .github/scripts
+
+      # スクリプトファイルを動的に生成（手間を省くためここに埋め込みます）
+      - name: Create AI Agent Script
+        run: |
+          cat << 'EOF' > .github/scripts/ai_agent.py
+          import os
+          import argparse
+          from anthropic import Anthropic
+          from openai import OpenAI
+
+          parser = argparse.ArgumentParser()
+          parser.add_argument('--role', required=True)
+          parser.add_argument('--input', default='')
+          parser.add_argument('--context', default='')
+          parser.add_argument('--output', default='')
+          parser.add_argument('--target', default='')
+          parser.add_argument('--test-log', default='')
+          args = parser.parse_args()
+
+          def get_context(files):
+              c = ""
+              if not files: return ""
+              for p in files.split(','):
+                  if os.path.exists(p):
+                      with open(p,'r') as f: c += f"\n--- {p} ---\n" + f.read()
+              return c
+
+          prompts = {
+              "architect": "あなたはアーキテクトです。ユーザーの要望から詳細な設計仕様書(Markdown)を作成してください。",
+              "tester": "あなたはQAエンジニアです。設計書に基づきPytest用のテストコードのみを作成してください。実装はまだありません。",
+              "developer": "あなたは開発者です。設計書とテストを読み、テストを通すPythonコードを実装してください。",
+              "reviewer": "あなたはコードレビュアーです。コードとテスト結果を読み、修正・最適化を行ってください。コードのみ出力して。"
+          }
+
+          content = ""
+          if args.role in ["architect", "tester", "developer"]:
+              client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+              p = f"{prompts[args.role]}\n\nInput:\n{args.input}\nContext:\n{get_context(args.context)}"
+              res = client.messages.create(model="claude-3-5-sonnet-20240620", max_tokens=4000, messages=[{"role":"user","content":p}])
+              content = res.content[0].text
+          elif args.role == "reviewer":
+              client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+              with open(args.target,'r') as f: code = f.read()
+              log = ""
+              if args.test_log and os.path.exists(args.test_log):
+                  with open(args.test_log,'r') as f: log = f.read()
+              res = client.chat.completions.create(model="gpt-4o", messages=[
+                  {"role":"system","content":"Output only code."},
+                  {"role":"user","content":f"{prompts['reviewer']}\nCode:\n{code}\nLog:\n{log}"}
+              ])
+              content = res.choices[0].message.content.replace("```python","").replace("```","")
+              args.output = args.target
+
+          if args.output and content:
+              os.makedirs(os.path.dirname(args.output), exist_ok=True)
+              with open(args.output,'w') as f: f.write(content)
+          EOF
+
+      - name: Claude - Design Phase
+        run: python .github/scripts/ai_agent.py --role architect --input "${{ github.event.issue.body }}" --output "docs/design_spec.md"
+      
+      - name: Claude - TDD (Write Tests)
+        run: python .github/scripts/ai_agent.py --role tester --context "docs/design_spec.md" --output "tests/test_feature.py"
+
+      - name: Claude - Implementation
+        run: python .github/scripts/ai_agent.py --role developer --context "docs/design_spec.md,tests/test_feature.py" --output "src/feature.py"
+
+      - name: Run Tests (First Pass)
+        id: test_run_1
+        continue-on-error: true
+        run: pytest tests/test_feature.py > test_result.log 2>&1 || echo "Tests Failed"
+
+      - name: Codex - Review & Refactor
+        if: always()
+        run: python .github/scripts/ai_agent.py --role reviewer --target "src/feature.py" --test-log "test_result.log"
+
+      - name: Run Tests (Final Pass)
+        run: pytest tests/test_feature.py
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          title: "AI Auto-Dev: ${{ github.event.issue.title }}"
+          body: |
+            AI Development Completed.
+            - Design: Claude
+            - Test & Code: Claude
+            - Review: Codex
+            closes #${{ github.event.issue.number }}
+          branch: "ai-feature/${{ github.event.issue.number }}"
+          base: main
