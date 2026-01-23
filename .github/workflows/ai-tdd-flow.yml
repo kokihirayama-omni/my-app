@@ -3,7 +3,6 @@ name: AI TDD Development Flow
 on:
   issues:
     types: [opened, edited]
-    if: contains(github.event.issue.labels.*.name, 'ai-dev')
 
 permissions:
   contents: write
@@ -12,6 +11,9 @@ permissions:
 
 jobs:
   ai-development-cycle:
+    # ✅ ラベル判定は job 側でやる
+    if: contains(github.event.issue.labels.*.name, 'ai-dev')
+
     runs-on: ubuntu-latest
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -23,17 +25,21 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install anthropic openai pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install anthropic openai pytest
 
-      - name: Create Scripts Directory
-        run: mkdir -p .github/scripts
+      - name: Create required directories
+        run: |
+          mkdir -p .github/scripts
+          mkdir -p docs tests src
 
-      # スクリプトファイルを動的に生成（手間を省くためここに埋め込みます）
+      # スクリプト生成（モデル名 latest 修正済み）
       - name: Create AI Agent Script
         run: |
           cat << 'EOF' > .github/scripts/ai_agent.py
@@ -53,10 +59,13 @@ jobs:
 
           def get_context(files):
               c = ""
-              if not files: return ""
+              if not files:
+                  return ""
               for p in files.split(','):
+                  p = p.strip()
                   if os.path.exists(p):
-                      with open(p,'r') as f: c += f"\n--- {p} ---\n" + f.read()
+                      with open(p, 'r', encoding='utf-8') as f:
+                          c += f"\n--- {p} ---\n" + f.read()
               return c
 
           prompts = {
@@ -67,32 +76,56 @@ jobs:
           }
 
           content = ""
+
           if args.role in ["architect", "tester", "developer"]:
               client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-              p = f"{prompts[args.role]}\n\nInput:\n{args.input}\nContext:\n{get_context(args.context)}"
-             res = client.messages.create(model="claude-3-5-sonnet-latest", max_tokens=4000, messages=[{"role":"user","content":p}])
+              p = f"{prompts[args.role]}\n\nInput:\n{args.input}\n\nContext:\n{get_context(args.context)}"
+              res = client.messages.create(
+                  model="claude-3-5-sonnet-latest",
+                  max_tokens=4000,
+                  messages=[{"role": "user", "content": p}],
+              )
               content = res.content[0].text
+
           elif args.role == "reviewer":
               client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-              with open(args.target,'r') as f: code = f.read()
+
+              if not args.target:
+                  raise SystemExit("--target is required for reviewer role")
+
+              with open(args.target, 'r', encoding='utf-8') as f:
+                  code = f.read()
+
               log = ""
               if args.test_log and os.path.exists(args.test_log):
-                  with open(args.test_log,'r') as f: log = f.read()
-              res = client.chat.completions.create(model="gpt-4o", messages=[
-                  {"role":"system","content":"Output only code."},
-                  {"role":"user","content":f"{prompts['reviewer']}\nCode:\n{code}\nLog:\n{log}"}
-              ])
-              content = res.choices[0].message.content.replace("```python","").replace("```","")
+                  with open(args.test_log, 'r', encoding='utf-8') as f:
+                      log = f.read()
+
+              res = client.chat.completions.create(
+                  model="gpt-4o",
+                  messages=[
+                      {"role": "system", "content": "Output only code. No markdown fences."},
+                      {"role": "user", "content": f"{prompts['reviewer']}\n\nCode:\n{code}\n\nTest Log:\n{log}"}
+                  ],
+              )
+
+              content = res.choices[0].message.content or ""
+              content = content.replace("```python", "").replace("```", "").strip()
+
+              # reviewerは target を上書き
               args.output = args.target
 
           if args.output and content:
-              os.makedirs(os.path.dirname(args.output), exist_ok=True)
-              with open(args.output,'w') as f: f.write(content)
+              out_dir = os.path.dirname(args.output)
+              if out_dir:
+                  os.makedirs(out_dir, exist_ok=True)
+              with open(args.output, 'w', encoding='utf-8') as f:
+                  f.write(content)
           EOF
 
       - name: Claude - Design Phase
         run: python .github/scripts/ai_agent.py --role architect --input "${{ github.event.issue.body }}" --output "docs/design_spec.md"
-      
+
       - name: Claude - TDD (Write Tests)
         run: python .github/scripts/ai_agent.py --role tester --context "docs/design_spec.md" --output "tests/test_feature.py"
 
@@ -102,14 +135,15 @@ jobs:
       - name: Run Tests (First Pass)
         id: test_run_1
         continue-on-error: true
-        run: pytest tests/test_feature.py > test_result.log 2>&1 || echo "Tests Failed"
+        run: |
+          pytest -q tests/test_feature.py > test_result.log 2>&1 || echo "Tests Failed"
 
       - name: Codex - Review & Refactor
         if: always()
         run: python .github/scripts/ai_agent.py --role reviewer --target "src/feature.py" --test-log "test_result.log"
 
       - name: Run Tests (Final Pass)
-        run: pytest tests/test_feature.py
+        run: pytest -q tests/test_feature.py
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v5
@@ -120,6 +154,10 @@ jobs:
             - Design: Claude
             - Test & Code: Claude
             - Review: Codex
+            closes #${{ github.event.issue.number }}
+          branch: "ai-feature/${{ github.event.issue.number }}"
+          base: main
+
             closes #${{ github.event.issue.number }}
           branch: "ai-feature/${{ github.event.issue.number }}"
           base: main
